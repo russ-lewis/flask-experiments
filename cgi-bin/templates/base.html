@@ -1,0 +1,28 @@
+<html>
+  <head>
+    {% block head %}
+    <title>{% block title %}Flask-experiements: {{request.url}}{% endblock %}</title>
+    {% endblock %}
+  </head>
+
+<body>
+
+{% block body %}
+
+<p>This is the Flask-experiements website.
+
+<p>You are looking at the base template, inside the %body% block.
+
+<p>This is the profile for {{username}}.  Does Jinja2 support the use of
+   many different references to the same variable, in this case
+   username={{username}} ?
+
+{% if name == "russ" %}
+  <p>Oh, I see that you are the user "russ."  You will have special
+     priviledges!
+{% endif %}
+
+{% endblock %}
+
+</body></html>
+
