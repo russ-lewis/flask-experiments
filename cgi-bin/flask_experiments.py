@@ -7,8 +7,17 @@ SQL_DB = "flask_experiments"
 
 import random   # in Python 3, use: import secrets
 
-from flask import Flask, request, render_template, url_for, redirect
+import json
+
+from googleapiclient.discovery import build
+
+from flask import Flask, request, render_template, url_for, redirect, make_response
 app = Flask(__name__)
+
+
+
+LOGIN_TIMEOUT   = "00:05:00"
+SESSION_TIMEOUT = "00:30:00"
 
 
 
@@ -30,8 +39,8 @@ def login():
     # Use the client_secret.json file to identify the application requesting
     # authorization. The client ID (from that file) and access scopes are required.
     flow = google_auth_oauthlib.flow.Flow.from_client_secrets_file(
-        'client_secret.json',
-        scopes=['https://www.googleapis.com/auth/userinfo.email'])
+        "client_secret.json",
+        scopes=["https://www.googleapis.com/auth/userinfo.email"])
 
     # Indicate where the API server will redirect the user after the user
     # completes the authorization flow. The redirect URI is required.  Note
@@ -42,7 +51,7 @@ def login():
     nonce = "%032x" % random.getrandbits(128)
 
     cursor = conn.cursor()
-    cursor.execute("""INSERT INTO login_states(nonce,expiration) VALUES(%s,ADDTIME(NOW(),"00:00:30"));""", (nonce,))
+    cursor.execute("""INSERT INTO login_states(nonce,expiration) VALUES(%s,ADDTIME(NOW(),%s));""", (nonce,LOGIN_TIMEOUT))
     assert cursor.rowcount == 1
     cursor.close()
     conn.commit()
@@ -50,17 +59,85 @@ def login():
 
     auth_url,state = flow.authorization_url(
         state=nonce,
-        include_granted_scopes='true'
+        include_granted_scopes="true"
     )
 
     return redirect(auth_url, code=303)
 
 
 
-@app.route("/login_oauth2callback", methods=['GET'])
+@app.route("/login_oauth2callback", methods=["GET"])
 def login_oauth2callback():
-    v = request.values
-    return "\n".join(["%s->%s" % (k,v[k]) for k in v])
+    nonce = request.values["state"]
+    code  = request.values["code"]
+    scope = request.values["scope"]
+
+    # connect to the SQL database.  Note that we're using the parameters from
+    # the the private config file.
+    conn = MySQLdb.connect(host   = pnsdp.SQL_HOST,
+                           user   = pnsdp.SQL_USER,
+                           passwd = pnsdp.SQL_PASSWD,
+                           db     = SQL_DB)
+
+    # is the nonce reasonable?  Note that we'll reject anything where the
+    # time is too old.
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM login_states WHERE nonce=%s AND NOW()<expiration;", (nonce,))
+    ok = (cursor.rowcount > 0)
+    cursor.close()
+
+    # clean up the nonce from the table (if it happens to exist).  Note that
+    # this is common code between the 'ok' and login-expired code
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM login_states WHERE nonce=%s;", (nonce,))
+    rowcount = cursor.rowcount
+    cursor.close()
+
+    if not ok:
+        conn.commit()
+        conn.close()
+        if rowcount > 0:
+            return "login process has expired"
+        else:
+            return "invalid nonce"
+
+    # exchange the code for the real token.
+
+    flow = google_auth_oauthlib.flow.Flow.from_client_secrets_file(
+        "client_secret.json",
+        scopes=None,
+        state=nonce)
+
+    # I'm not sure why we have to set the redirect_uri here; it seems
+    # like it would be redundant.  But the operation will fail if we
+    # don't do this.
+    flow.redirect_uri = url_for("login_oauth2callback", _external=True)
+
+    flow.fetch_token(code=code)
+
+    cred = flow.credentials
+    cred_text = json.dumps({"token"     : cred.token,
+                            "token_uri" : cred.token_uri,
+                            "scopes"    : cred.scopes})
+
+    # get the user's email address
+    userinfo = build("oauth2","v2", credentials=cred).userinfo().get().execute()
+
+    gmail = userinfo["email"]
+
+    # create the session in the database
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO sessions(id,gmail,expiration) VALUES(%s,%s, ADDTIME(NOW(),%s));", (nonce,gmail, SESSION_TIMEOUT))
+    assert cursor.rowcount == 1
+    cursor.close()
+    conn.commit()
+    conn.close()
+
+    # send the nonce as the cookie ID to the user
+    resp = make_response(render_template("loginOK.html", username="russ", gmail=gmail))
+    resp.set_cookie("sessionID", nonce)
+
+    return resp
 
 
 
@@ -72,6 +149,6 @@ def profile(username):
 
 @app.route("/url_check")
 def url_check():
-    return "The URL to /login is: "+url_for('login')
+    return "The URL to /login is: "+url_for("login")
 
 
