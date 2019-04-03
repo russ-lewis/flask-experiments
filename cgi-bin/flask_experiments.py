@@ -25,90 +25,187 @@ SESSION_TIMEOUT = "00:30:00"
 
 
 
+# this seems very strange to me, but I think it's actually correct: the
+# database connection is a single object, which is shared amongst *all*
+# of the requests.  Note that I don't have any code for re-connecting
+# the database; if this connection fails, the application is dead.  I
+# need to fix that!
+#
+# TOOD: fix that
+
+db = MySQLdb.connect(host   = pnsdp.SQL_HOST,
+                     user   = pnsdp.SQL_USER,
+                     passwd = pnsdp.SQL_PASSWD,
+                     db     = SQL_DB)
+
+# this is a test to see how WSGI works: will the marker stay the same
+# forever?
+marker = random.randint(0,65535)
+
+
+
 def gen_nonce():
     return "%032x" % random.getrandbits(128)
     
 
 
-def open_db():
-    # connect to the SQL database.  Note that we're using the parameters from
-    # the the private config file.
-    return MySQLdb.connect(host   = pnsdp.SQL_HOST,
-                           user   = pnsdp.SQL_USER,
-                           passwd = pnsdp.SQL_PASSWD,
-                           db     = SQL_DB)
-
-
-
-def get_session(db, create=False):
+def get_session():
     # if the user doesn't even report a cookie, then we don't have any session
-    # to connect to; unless 'create' is true, we're done.
-    if "sessionID" not in request.cookies or request.cookies["sessionID"] == "-":
-        if create:
-            return new_session(db)
-        return None
+    # to connect to; create one.
+    if "sessionID" not in request.cookies or request.cookies["sessionID"] == "":
+        return new_session(db)
 
     # ok, the session ID appears to exist.  Let's confirm it in the DB.
-    id = request.cookies["id"]
+    id = request.cookies["sessionID"]
 
     cursor = db.cursor()
-    cursor.execute("SELECT * FROM sessions WHERE id=%s AND expiration>NOW();", id)
+    cursor.execute("SELECT id,gmail,github FROM sessions WHERE id=%s AND expiration>NOW();", (id,))
     records = cursor.fetchall()
     cursor.close()
 
-    # ignore the cookie if it's not in the database
+    # ignore the cookie if it's not in the database.  Recreate from scratch.
+    # Note that an expired session is treated the same as a non-existent one.
     if len(records) == 0:
-        # TODO: report error to the user
-        # TODO: discard the session ID cookie
+        return new_session(db)
 
-        if create:
-            return new_session(db)
-        return None
-
+    # if we get here, then the session is valid.  Sanity check the return values.
     assert len(records) == 1
-    assert records[0]["id"] == id
+    assert records[0][0] == id
 
-    # touch the record; keep the session alive by adjusting the expiration
-    cursor = cursor.conn()
-    cursor.execute("UPDATE sessions SET expiration=ADDTIME(NOW(),%s);", SESSION_TIMEOUT)
+    # touch the record; keep the session alive by adjusting the expiration.
+    # Note that this operation is completely isolated from other operations, so
+    # I'm OK with committing here.  (I don't care if the session-creation operation
+    # isn't atomic with other operations.)
+    cursor = db.cursor()
+    cursor.execute("UPDATE sessions SET expiration=ADDTIME(NOW(),%s);", (SESSION_TIMEOUT,))
     cursor.close()
+    db.commit()
 
     # build the session dictionary
     return { "id"    : id,
-             "gmail" : records[0]["gmail" ],
-             "github": records[0]["github"], }
+             "gmail" : records[0][1],
+             "github": records[0][2], }
 
 def new_session(db):
     nonce = gen_nonce()
 
     # create the session in the DB
-    cursor = cursor.conn()
-    cursor.execute("INSERT INTO sessions(id,expiration) VALUES(%s,ADDTIME(NOW(),%s));", (nonce, SESSION_TIMEOUT)
+    cursor = db.cursor()
+    cursor.execute("INSERT INTO sessions(id,expiration) VALUES(%s,ADDTIME(NOW(),%s));", (nonce, SESSION_TIMEOUT))
+    assert cursor.rowcount == 1   # TODO: report an error message
     cursor.close()
+    db.commit()
+
+    global russ_set_sessionID
+    russ_set_sessionID = nonce
 
     return { "id"    : nonce,
              "gmail" : None,
              "github": None, }
 
+# if this is anything other than None, then we will call set_cookie() on the response
+# object when we're done, to update the sessionID variable.
+russ_set_sessionID = None
+
+@app.after_request
+def russ_set_sessionID_callback(resp):
+    global russ_set_sessionID
+
+    if russ_set_sessionID is not None:
+        resp.set_cookie("sessionID", russ_set_sessionID)
+        russ_set_sessionID = None
+
+    return resp
+
+
+
+# this holds the flash messages stored by russ_flash().  It has three
+# possible states:
+#    None - no cookie changes required at end (init state)
+#    []   - browser has non-empty cookie; empty it at end
+#    list - store messages at end
+
+russ_flash_messages_pending = None
+
+def russ_flash(msg):
+    global russ_flash_messages_pending
+
+    if russ_flash_messages_pending is None:
+        russ_flash_messages_pending = [msg]
+        return
+
+    # otherwise, must be a list; could be empty
+    russ_flash_messages_pending.append(msg)
+
+@app.after_request
+def russ_post_flash_messages(resp):
+    global russ_flash_messages_pending
+
+    if russ_flash_messages_pending is None:
+        return resp   # NOP
+
+    # otherwise, must be a list; could be empty
+    if len(russ_flash_messages_pending) == 0:
+        resp.set_cookie("flash_messages", "")
+    else:
+        resp.set_cookie("flash_messages", json.dumps(russ_flash_messages_pending))
+
+    # reset the list.  I *think* this is necessary, since it's a global,
+    # although I don't 100% understand Flask's model for how global
+    # variables work.
+    russ_flash_messages_pending = None
+
+    return resp
+
+def russ_get_flashed_messages():
+    global russ_flash_messages_pending
+
+    if "flash_messages" not in request.cookies or request.cookies["flash_messages"] == "":
+        russ_flash_messages_pending = None   # this is probably redundant, right?
+        return []
+
+    msgs = json.loads(request.cookies["flash_messages"])
+    russ_flash_messages_pending = []
+    return msgs
+
+# this makes the get() function callable from our templates
+app.jinja_env.globals.update(russ_get_flashed_messages=russ_get_flashed_messages)
+
 
 
 @app.route("/")
 def index():
+    russ_flash("Current marker: "+str(marker))
     return render_template("index.html")
+
+
+
+@app.route("/debug/marker")
+def read_marker():
+    return str(marker)
 
 
 
 @app.route("/login")
 def login():
-    db = open_db()
-    session = 
+    session = get_session()
+    russ_flash("session = "+str(session))
 
-    # connect to the SQL database.  Note that we're using the parameters from
-    # the the private config file.
-    conn = MySQLdb.connect(host   = pnsdp.SQL_HOST,
-                           user   = pnsdp.SQL_USER,
-                           passwd = pnsdp.SQL_PASSWD,
-                           db     = SQL_DB)
+    if "service" not in request.values:
+        russ_flash("The 'login' page requires certain parameters, which were not supplied.")
+        return redirect(url_for("index"), code=303)
+
+    service = request.values["service"]
+    if service != "google":
+        russ_flash("The 'login' page does not currently support any service other than Google; use other links for other services.")
+        return redirect(url_for("index"), code=303)
+
+    # is the user already logged in?  If so, then redirect back to the index.
+    # Note that this is not an error, so we probably shouldn't flash to the
+    # user, but I'm going to do this temporarily just for the sake of debug.
+    if session is not None and session["gmail"] is not None:
+        russ_flash("You are already logged in as: "+session["gmail"])
+        return redirect(url_for("index"), code=303)
 
     # Use the google_client_secret.json file to identify the application
     # requesting authorization. The client ID (from that file) and access
@@ -123,14 +220,17 @@ def login():
     # which is critical for an redirect that we're going to send to Google!
     flow.redirect_uri = url_for("login_oauth2callback", _external=True)
 
+    # NOTE: The login attempt has a different nonce than the session, since
+    #       there might be multiple login attempts by the same user, in the
+    #       same browser.
     nonce = gen_nonce()
 
-    cursor = conn.cursor()
+    cursor = db.cursor()
     cursor.execute("""INSERT INTO login_states(nonce,service,expiration) VALUES(%s,"google",ADDTIME(NOW(),%s));""", (nonce,LOGIN_TIMEOUT))
     assert cursor.rowcount == 1
     cursor.close()
-    conn.commit()
-    conn.close()
+    db.commit()
+    db.close()
 
     auth_url,state = flow.authorization_url(
         state="google:"+nonce,
@@ -178,9 +278,10 @@ def login_oauth2callback():
         conn.commit()
         conn.close()
         if rowcount > 0:
-            return "login process has expired"
+            russ_flash("Login process has expired")
         else:
-            return "invalid nonce"
+            russ_flash("Invalid nonce")
+        return redirect(url_for("index"), code=303)
 
     # exchange the code for the real token.
 
@@ -214,14 +315,8 @@ def login_oauth2callback():
     conn.commit()
     conn.close()
 
-    # send the nonce as the cookie ID to the user
-
-# TODO: adapt to make_response(redirect( ... which is supposed to work.  Or actually, do that in the *beginning* of login()
-
-    resp = make_response(render_template("loginOK.html", username="russ", gmail=gmail))
-    resp.set_cookie("sessionID", nonce)
-
-    return resp
+    russ_flash("Successfully logged in as gmail account '%s'" % gmail);
+    return redirect(url_for("index"), code=303)
 
 
 
@@ -351,14 +446,12 @@ def login_github_oauth2callback():
 
 
 
-@app.route("/profile/<string:username>")   # string means no slashes
-def profile(username):
-    return render_template("profile.html", username=username)
+@app.route("/debug/test_flash_msg")
+def test_flash_msg():
+    if "msg" not in request.values:
+        russ_flash("test_flash_msg(): the 'msg' variable is required.")
+        return redirect(url_for("index"), code=303)
 
-
-
-@app.route("/url_check")
-def url_check():
-    return "The URL to /login is: "+url_for("login")
-
+    russ_flash(request.values["msg"])
+    return redirect(url_for("index"), code=303)
 

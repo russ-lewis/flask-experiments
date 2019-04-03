@@ -1,11 +1,24 @@
 <html>
   <head>
     {% block head %}
-    <title>{% block title %}Flask-experiements: {{request.url}}{% endblock %}</title>
+    <title>{% block title %}Flask-experiments: {{request.url}}{% endblock %}</title>
     {% endblock %}
   </head>
 
 <body>
+
+{% with messages = russ_get_flashed_messages() %}
+  {% if messages %}
+  <p>
+  <b><font color=red>
+  <ul>
+    {% for message in messages %}
+      <li>{{message}}</li>
+    {% endfor %}
+  </ul>
+  </font></b>
+  {% endif %}
+{% endwith %}
 
 {% block body %}
 
