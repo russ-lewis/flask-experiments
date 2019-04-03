@@ -15,7 +15,7 @@ import requests
 
 from googleapiclient.discovery import build
 
-from flask import Flask, request, render_template, url_for, redirect, make_response
+from flask import Flask, request, render_template, url_for, redirect, make_response, g
 app = Flask(__name__)
 
 
@@ -33,14 +33,23 @@ SESSION_TIMEOUT = "00:30:00"
 #
 # TOOD: fix that
 
-db = MySQLdb.connect(host   = pnsdp.SQL_HOST,
-                     user   = pnsdp.SQL_USER,
-                     passwd = pnsdp.SQL_PASSWD,
-                     db     = SQL_DB)
+def get_db():
+    # the database connection is stored in the application context.  Contrary
+    # to what the name implies, this really doesn't persist across requests;
+    # rather, it's a single context, per-client-request, which can be shared
+    # across requests if you happen to have *nested invocation*.
+    #
+    # So on every new HTTP operation, expect to open a new DB connection.
+    #
+    # TODO: investigate connection pooling and SQL Alchemy.  That seems to be
+    #       the standard-of-choice for SQL databases in Flask.
 
-# this is a test to see how WSGI works: will the marker stay the same
-# forever?
-marker = random.randint(0,65535)
+    if not hasattr(g, "db"):
+        g.db = MySQLdb.connect(host   = pnsdp.SQL_HOST,
+                               user   = pnsdp.SQL_USER,
+                               passwd = pnsdp.SQL_PASSWD,
+                               db     = SQL_DB)
+    return g.db
 
 
 
@@ -58,6 +67,7 @@ def get_session():
     # ok, the session ID appears to exist.  Let's confirm it in the DB.
     id = request.cookies["sessionID"]
 
+    db = get_db()
     cursor = db.cursor()
     cursor.execute("SELECT id,gmail,github FROM sessions WHERE id=%s AND expiration>NOW();", (id,))
     records = cursor.fetchall()
@@ -90,6 +100,7 @@ def new_session(db):
     nonce = gen_nonce()
 
     # create the session in the DB
+    db = get_db()
     cursor = db.cursor()
     cursor.execute("INSERT INTO sessions(id,expiration) VALUES(%s,ADDTIME(NOW(),%s));", (nonce, SESSION_TIMEOUT))
     assert cursor.rowcount == 1   # TODO: report an error message
@@ -175,14 +186,7 @@ app.jinja_env.globals.update(russ_get_flashed_messages=russ_get_flashed_messages
 
 @app.route("/")
 def index():
-    russ_flash("Current marker: "+str(marker))
     return render_template("index.html")
-
-
-
-@app.route("/debug/marker")
-def read_marker():
-    return str(marker)
 
 
 
@@ -214,6 +218,9 @@ def login():
         "google_client_secret.json",
         scopes=["https://www.googleapis.com/auth/userinfo.email"])
 
+    russ_flash(url_for("login_oauth2callback", _external=True))
+    return redirect(url_for("index"), code=303)
+
     # Indicate where the API server will redirect the user after the user
     # completes the authorization flow. The redirect URI is required.  Note
     # that the 'external' argument will cause the hostname to be included,
@@ -225,6 +232,7 @@ def login():
     #       same browser.
     nonce = gen_nonce()
 
+    db = get_db()
     cursor = db.cursor()
     cursor.execute("""INSERT INTO login_states(nonce,service,expiration) VALUES(%s,"google",ADDTIME(NOW(),%s));""", (nonce,LOGIN_TIMEOUT))
     assert cursor.rowcount == 1
