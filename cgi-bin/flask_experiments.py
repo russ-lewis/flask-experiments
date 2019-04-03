@@ -25,6 +25,73 @@ SESSION_TIMEOUT = "00:30:00"
 
 
 
+def gen_nonce():
+    return "%032x" % random.getrandbits(128)
+    
+
+
+def open_db():
+    # connect to the SQL database.  Note that we're using the parameters from
+    # the the private config file.
+    return MySQLdb.connect(host   = pnsdp.SQL_HOST,
+                           user   = pnsdp.SQL_USER,
+                           passwd = pnsdp.SQL_PASSWD,
+                           db     = SQL_DB)
+
+
+
+def get_session(db, create=False):
+    # if the user doesn't even report a cookie, then we don't have any session
+    # to connect to; unless 'create' is true, we're done.
+    if "sessionID" not in request.cookies or request.cookies["sessionID"] == "-":
+        if create:
+            return new_session(db)
+        return None
+
+    # ok, the session ID appears to exist.  Let's confirm it in the DB.
+    id = request.cookies["id"]
+
+    cursor = db.cursor()
+    cursor.execute("SELECT * FROM sessions WHERE id=%s AND expiration>NOW();", id)
+    records = cursor.fetchall()
+    cursor.close()
+
+    # ignore the cookie if it's not in the database
+    if len(records) == 0:
+        # TODO: report error to the user
+        # TODO: discard the session ID cookie
+
+        if create:
+            return new_session(db)
+        return None
+
+    assert len(records) == 1
+    assert records[0]["id"] == id
+
+    # touch the record; keep the session alive by adjusting the expiration
+    cursor = cursor.conn()
+    cursor.execute("UPDATE sessions SET expiration=ADDTIME(NOW(),%s);", SESSION_TIMEOUT)
+    cursor.close()
+
+    # build the session dictionary
+    return { "id"    : id,
+             "gmail" : records[0]["gmail" ],
+             "github": records[0]["github"], }
+
+def new_session(db):
+    nonce = gen_nonce()
+
+    # create the session in the DB
+    cursor = cursor.conn()
+    cursor.execute("INSERT INTO sessions(id,expiration) VALUES(%s,ADDTIME(NOW(),%s));", (nonce, SESSION_TIMEOUT)
+    cursor.close()
+
+    return { "id"    : nonce,
+             "gmail" : None,
+             "github": None, }
+
+
+
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -33,6 +100,9 @@ def index():
 
 @app.route("/login")
 def login():
+    db = open_db()
+    session = 
+
     # connect to the SQL database.  Note that we're using the parameters from
     # the the private config file.
     conn = MySQLdb.connect(host   = pnsdp.SQL_HOST,
@@ -53,7 +123,7 @@ def login():
     # which is critical for an redirect that we're going to send to Google!
     flow.redirect_uri = url_for("login_oauth2callback", _external=True)
 
-    nonce = "%032x" % random.getrandbits(128)
+    nonce = gen_nonce()
 
     cursor = conn.cursor()
     cursor.execute("""INSERT INTO login_states(nonce,service,expiration) VALUES(%s,"google",ADDTIME(NOW(),%s));""", (nonce,LOGIN_TIMEOUT))
@@ -145,6 +215,9 @@ def login_oauth2callback():
     conn.close()
 
     # send the nonce as the cookie ID to the user
+
+# TODO: adapt to make_response(redirect( ... which is supposed to work.  Or actually, do that in the *beginning* of login()
+
     resp = make_response(render_template("loginOK.html", username="russ", gmail=gmail))
     resp.set_cookie("sessionID", nonce)
 
@@ -161,7 +234,7 @@ def login_github():
                            passwd = pnsdp.SQL_PASSWD,
                            db     = SQL_DB)
 
-    nonce = "%032x" % random.getrandbits(128)
+    nonce = gen_nonce()
 
     cursor = conn.cursor()
     cursor.execute("""INSERT INTO login_states(nonce,service,expiration) VALUES(%s,"github",ADDTIME(NOW(),%s));""", (nonce,LOGIN_TIMEOUT))
@@ -247,34 +320,20 @@ def login_github_oauth2callback():
           )
 
     resp = requests.post(url)
-    return "%d" % r.status_code)
+    token = None
+    vars = {}
+    for param in resp.text.strip().split('&'):
+        (name,val) = param.split('=')
+        vars[name] = val
+        if name == "access_token":
+            token = val
+            break
 
-    return redirect(url, code=303)
+    if token is None:
+        return "Error!"
 
-
-
-
-    flow = google_auth_oauthlib.flow.Flow.from_client_secrets_file(
-        "google_client_secret.json",
-        scopes=None,
-        state=nonce)
-
-    # I'm not sure why we have to set the redirect_uri here; it seems
-    # like it would be redundant.  But the operation will fail if we
-    # don't do this.
-    flow.redirect_uri = url_for("login_oauth2callback", _external=True)
-
-    flow.fetch_token(code=code)
-
-    cred = flow.credentials
-    cred_text = json.dumps({"token"     : cred.token,
-                            "token_uri" : cred.token_uri,
-                            "scopes"    : cred.scopes})
-
-    # get the user's email address
-    userinfo = build("oauth2","v2", credentials=cred).userinfo().get().execute()
-
-    gmail = userinfo["email"]
+    email_resp = requests.get("https://api.github.com/user?access_token="+token)
+    github_id = json.loads(email_resp.text.encode("utf-8"))["login"]
 
     # create the session in the database
     cursor = conn.cursor()
@@ -289,9 +348,6 @@ def login_github_oauth2callback():
     resp.set_cookie("sessionID", nonce)
 
     return resp
-
-
-
 
 
 
