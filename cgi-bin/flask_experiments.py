@@ -62,7 +62,7 @@ def get_session():
     # if the user doesn't even report a cookie, then we don't have any session
     # to connect to; create one.
     if "sessionID" not in request.cookies or request.cookies["sessionID"] == "":
-        return new_session(db)
+        return new_session()
 
     # ok, the session ID appears to exist.  Let's confirm it in the DB.
     id = request.cookies["sessionID"]
@@ -76,11 +76,7 @@ def get_session():
     # ignore the cookie if it's not in the database.  Recreate from scratch.
     # Note that an expired session is treated the same as a non-existent one.
     if len(records) == 0:
-        return new_session(db)
-
-    # if we get here, then the session is valid.  Sanity check the return values.
-    assert len(records) == 1
-    assert records[0][0] == id
+        return new_session()
 
     # touch the record; keep the session alive by adjusting the expiration.
     # Note that this operation is completely isolated from other operations, so
@@ -96,14 +92,16 @@ def get_session():
              "gmail" : records[0][1],
              "github": records[0][2], }
 
-def new_session(db):
+def new_session():
+    db = get_db()
+
     nonce = gen_nonce()
 
     # create the session in the DB
     db = get_db()
     cursor = db.cursor()
     cursor.execute("INSERT INTO sessions(id,expiration) VALUES(%s,ADDTIME(NOW(),%s));", (nonce, SESSION_TIMEOUT))
-    assert cursor.rowcount == 1   # TODO: report an error message
+    rowcount = cursor.rowcount 
     cursor.close()
     db.commit()
 
@@ -218,9 +216,6 @@ def login():
         "google_client_secret.json",
         scopes=["https://www.googleapis.com/auth/userinfo.email"])
 
-    russ_flash(url_for("login_oauth2callback", _external=True))
-    return redirect(url_for("index"), code=303)
-
     # Indicate where the API server will redirect the user after the user
     # completes the authorization flow. The redirect URI is required.  Note
     # that the 'external' argument will cause the hostname to be included,
@@ -234,8 +229,7 @@ def login():
 
     db = get_db()
     cursor = db.cursor()
-    cursor.execute("""INSERT INTO login_states(nonce,service,expiration) VALUES(%s,"google",ADDTIME(NOW(),%s));""", (nonce,LOGIN_TIMEOUT))
-    assert cursor.rowcount == 1
+    cursor.execute("""INSERT INTO login_states(nonce,service,sessionID,expiration) VALUES(%s,"google",%sADDTIME(NOW(),%s));""", (nonce,session["id"],LOGIN_TIMEOUT))
     cursor.close()
     db.commit()
     db.close()
@@ -314,6 +308,8 @@ def login_oauth2callback():
     userinfo = build("oauth2","v2", credentials=cred).userinfo().get().execute()
 
     gmail = userinfo["email"]
+
+    return "TODO: update the session update here.  Don't set 'gmail', set 'github' instead, and also don't INSERT, do an UPDATE"
 
     # create the session in the database
     cursor = conn.cursor()
@@ -433,15 +429,17 @@ def login_github_oauth2callback():
             break
 
     if token is None:
-        return "Error!"
+        russ_flash("ERROR: access_token not provided in data from GitHub.")
+        return redirect(url_for("index"), code=303)
 
     email_resp = requests.get("https://api.github.com/user?access_token="+token)
     github_id = json.loads(email_resp.text.encode("utf-8"))["login"]
 
+    return "TODO: need to change how we update the database here.  Change the existing session, instead of inserting a new one."
+
     # create the session in the database
     cursor = conn.cursor()
     cursor.execute("INSERT INTO sessions(id,gmail,expiration) VALUES(%s,%s, ADDTIME(NOW(),%s));", (nonce,gmail, SESSION_TIMEOUT))
-    assert cursor.rowcount == 1
     cursor.close()
     conn.commit()
     conn.close()
@@ -462,4 +460,25 @@ def test_flash_msg():
 
     russ_flash(request.values["msg"])
     return redirect(url_for("index"), code=303)
+
+
+
+@app.route("/util/cleanup_expired_records")
+def cleanup_expired_records():
+    db = get_db()
+
+    cursor = db.cursor()
+    cursor.execute("DELETE FROM login_states WHERE expiration<NOW();")
+    russ_flash("Deleted %d rows from the table 1" % cursor.rowcount)
+    cursor.close()
+
+    cursor = db.cursor()
+    cursor.execute("DELETE FROM sessions WHERE expiration<NOW();")
+    russ_flash("Deleted %d rows from the table 2" % cursor.rowcount)
+    cursor.close()
+
+    db.commit()
+
+    return redirect(url_for("index"), code=303)
+
 
