@@ -93,8 +93,6 @@ def get_session():
              "github": records[0][2], }
 
 def new_session():
-    db = get_db()
-
     nonce = gen_nonce()
 
     # create the session in the DB
@@ -141,6 +139,7 @@ def russ_flash(msg):
 
     if russ_flash_messages_pending is None:
         russ_flash_messages_pending = [msg]
+        russ_flash_messages_pending.append("TODO: include code to check if we've read the old messages.  If we haven't, then read them in...because we're losing multiple-message situations, in the case where we have multiple redirects or pages before we actually display the messages.")
         return
 
     # otherwise, must be a list; could be empty
@@ -191,16 +190,19 @@ def index():
 @app.route("/login")
 def login():
     session = get_session()
-    russ_flash("session = "+str(session))
 
     if "service" not in request.values:
         russ_flash("The 'login' page requires certain parameters, which were not supplied.")
         return redirect(url_for("index"), code=303)
 
     service = request.values["service"]
-    if service != "google":
-        russ_flash("The 'login' page does not currently support any service other than Google; use other links for other services.")
+    if service not in ["google","github"]:
+        russ_flash("Unsupported service for the 'login' page.")
         return redirect(url_for("index"), code=303)
+
+    if service == "github":
+        russ_flash("TODO: integrate the two login processes")
+        return redirect(url_for("login_github"), code=303)
 
     # is the user already logged in?  If so, then redirect back to the index.
     # Note that this is not an error, so we probably shouldn't flash to the
@@ -229,7 +231,7 @@ def login():
 
     db = get_db()
     cursor = db.cursor()
-    cursor.execute("""INSERT INTO login_states(nonce,service,sessionID,expiration) VALUES(%s,"google",%sADDTIME(NOW(),%s));""", (nonce,session["id"],LOGIN_TIMEOUT))
+    cursor.execute("""INSERT INTO login_states(nonce,service,sessionID,expiration) VALUES(%s,"google",%s,ADDTIME(NOW(),%s));""", (nonce,session["id"],LOGIN_TIMEOUT))
     cursor.close()
     db.commit()
     db.close()
@@ -239,6 +241,7 @@ def login():
         include_granted_scopes="true"
     )
 
+    russ_flash("URL going to Google: "+auth_url)
     return redirect(auth_url, code=303)
 
 
@@ -313,7 +316,7 @@ def login_oauth2callback():
 
     # create the session in the database
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO sessions(id,gmail,expiration) VALUES(%s,%s, ADDTIME(NOW(),%s));", (nonce,gmail, SESSION_TIMEOUT))
+    cursor.execute("INSERT INTO sessions(id,gmail,expiration) VALUES(%s,%s,ADDTIME(NOW(),%s));", (nonce,gmail, SESSION_TIMEOUT))
     assert cursor.rowcount == 1
     cursor.close()
     conn.commit()
@@ -356,6 +359,7 @@ def login_github():
                                 "state"        : state,})
           )
 
+    russ_flash("URL going to GitHub: "+url)
     return redirect(url, code=303)
 
 
